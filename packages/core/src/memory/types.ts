@@ -148,6 +148,16 @@ export interface WorkflowStateEntry {
       stepExecutionState?: any;
       completedStepsData?: any[];
       workflowState?: Record<string, unknown>;
+      stepData?: Record<
+        string,
+        {
+          input: unknown;
+          output?: unknown;
+          status: "running" | "success" | "error" | "suspended" | "cancelled" | "skipped";
+          error?: unknown;
+        }
+      >;
+      usage?: UsageInfo;
     };
     suspendData?: any;
   };
@@ -179,6 +189,10 @@ export interface WorkflowStateEntry {
   userId?: string;
   /** Conversation ID if applicable */
   conversationId?: string;
+  /** Source execution ID if this run is a replay */
+  replayedFromExecutionId?: string;
+  /** Source step ID used when this run was replayed */
+  replayFromStepId?: string;
   /** Additional metadata */
   metadata?: Record<string, unknown>;
   /** Timestamps */

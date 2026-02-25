@@ -255,7 +255,7 @@ When you use `createWorkflowChain`, you are creating a **builder** object (`Work
 
 This builder is not the final, runnable workflow itself. It's the blueprint.
 
-There are two ways to run your workflow:
+There are three ways to run your workflow:
 
 **1. The Shortcut: `.run()`**
 
@@ -266,7 +266,38 @@ Calling `.run()` directly on the chain is a convenient shortcut. Behind the scen
 const result = await workflow.run({ name: "World" });
 ```
 
-**2. The Reusable Way: `.toWorkflow()`**
+**2. Fire-and-Forget: `.startAsync()`**
+
+Use `.startAsync()` when you want to trigger a workflow and continue immediately without waiting for completion. It returns execution metadata (`executionId`, `workflowId`, `startAt`) right away.
+
+```typescript
+import { InMemoryStorageAdapter, Memory, createWorkflowChain } from "@voltagent/core";
+import { z } from "zod";
+
+const workflowMemory = new Memory({
+  storage: new InMemoryStorageAdapter(),
+});
+
+const greeterChain = createWorkflowChain({
+  id: "async-greeter",
+  name: "Async Greeter",
+  input: z.object({ name: z.string() }),
+  result: z.object({ greeting: z.string() }),
+  memory: workflowMemory,
+}).andThen({
+  id: "create-greeting",
+  execute: async ({ data }) => ({ greeting: `Hello, ${data.name}!` }),
+});
+
+const started = await greeterChain.startAsync({ name: "Alice" });
+console.log(started.executionId, started.startAt); // Track this run later
+
+// Query execution state later from workflow memory
+const state = await greeterChain.toWorkflow().memory.getWorkflowState(started.executionId);
+console.log(state?.status); // running | completed | suspended | cancelled | error
+```
+
+**3. The Reusable Way: `.toWorkflow()`**
 
 The `WorkflowChain` builder has a `.toWorkflow()` method that converts your blueprint into a permanent, reusable `Workflow` object. You can store this object, pass it to other functions, or run it multiple times without rebuilding the chain.
 
@@ -400,6 +431,60 @@ This allows the agent to maintain a persistent, contextual conversation with eac
 )
 // The `userId` and `conversationId` from the run state are automatically
 // used by the agent's memory to provide context-aware responses.
+```
+
+### Execution Primitives in Step Context
+
+Each workflow step now has control/introspection helpers for early exits and history lookups:
+
+- `bail(result?)`: Complete the workflow immediately with a final result
+- `abort()`: Cancel the workflow immediately
+- `getStepResult(stepId)`: Read a previous step's output (or `null`)
+- `getInitData()`: Read the original workflow input, even after resume
+
+```typescript
+import { createWorkflowChain } from "@voltagent/core";
+import { z } from "zod";
+
+const workflow = createWorkflowChain({
+  id: "execution-primitives-demo",
+  name: "Execution Primitives Demo",
+  input: z.object({ userId: z.string(), amount: z.number() }),
+  result: z.object({
+    status: z.enum(["approved", "rejected", "cancelled"]),
+    userId: z.string(),
+  }),
+})
+  .andThen({
+    id: "risk-check",
+    execute: async ({ data }) => ({
+      score: data.amount > 1000 ? 95 : 20,
+      userId: data.userId,
+    }),
+  })
+  .andThen({
+    id: "decision",
+    execute: async ({ getStepResult, getInitData, bail, abort }) => {
+      const risk = getStepResult<{ score: number; userId: string }>("risk-check");
+      const init = getInitData();
+
+      if (!risk) {
+        abort(); // terminal status: cancelled
+      }
+
+      if (risk.score >= 90) {
+        bail({
+          status: "rejected",
+          userId: init.userId,
+        }); // terminal status: completed
+      }
+
+      return {
+        status: "approved",
+        userId: init.userId,
+      };
+    },
+  });
 ```
 
 ### Workflow Retry Policies
@@ -557,6 +642,73 @@ new VoltAgent({
 ```
 
 This registration step is what connects your locally executed workflows to the broader observability layer, allowing you to monitor, debug, and manage them from a central location.
+
+### Restarting Interrupted Runs
+
+You can recover runs left in `running` state (for example after a crash) using restart APIs:
+
+```typescript
+const runnableWorkflow = workflow.toWorkflow();
+
+// Restart one execution
+await runnableWorkflow.restart("exec_1234567890_abc123");
+
+// Restart all active runs of this workflow
+await runnableWorkflow.restartAllActive();
+```
+
+You can call these APIs directly on a `WorkflowChain` too:
+`await workflow.restart("exec_...")` and `await workflow.restartAllActive()`.
+These are equivalent to `workflow.toWorkflow().restart(...)` and `workflow.toWorkflow().restartAllActive()`.
+
+For cross-workflow recovery, use `WorkflowRegistry.getInstance().restartAllActiveWorkflowRuns()`.
+
+### Time Travel (Deterministic Replay)
+
+Use time travel when you need to replay a historical execution from a specific step for debugging or operational recovery.
+
+Unlike `restart()`, time travel creates a new execution ID and keeps the original run immutable.
+
+```typescript
+const runnableWorkflow = workflow.toWorkflow();
+
+const original = await runnableWorkflow.run({ value: 1 });
+
+const replay = await runnableWorkflow.timeTravel({
+  executionId: original.executionId,
+  stepId: "step-2",
+  // Optional overrides:
+  // inputData: { value: 100 },
+  // resumeData: { approved: true },
+  // workflowStateOverride: { replayReason: "manual-debug" },
+});
+
+console.log(replay.executionId); // New replay execution ID
+console.log(replay.result); // Final replay output
+
+const replayState = await runnableWorkflow.memory.getWorkflowState(replay.executionId);
+console.log(replayState?.replayedFromExecutionId); // original.executionId
+console.log(replayState?.replayFromStepId); // "step-2"
+```
+
+`WorkflowChain` exposes the same APIs:
+
+```typescript
+await workflow.timeTravel({
+  executionId: original.executionId,
+  stepId: "step-2",
+});
+
+const replayStream = workflow.timeTravelStream({
+  executionId: original.executionId,
+  stepId: "step-2",
+});
+```
+
+Notes:
+
+- Time travel only works for non-running executions.
+- If the source execution is still `running`, use `restart(...)` for crash recovery or wait until it reaches a terminal status.
 
 ### Executing Workflows via REST API
 

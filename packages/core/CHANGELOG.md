@@ -1,5 +1,213 @@
 # @voltagent/core
 
+## 2.6.1
+
+### Patch Changes
+
+- [#1103](https://github.com/VoltAgent/voltagent/pull/1103) [`edd7181`](https://github.com/VoltAgent/voltagent/commit/edd718147e0493cebd2ee5145d239577ee73139b) Thanks [@omeraplak](https://github.com/omeraplak)! - fix: preserve getter-based `fullStream` tee behavior after startup probing in `streamText`/`streamObject`
+
+  This prevents `TypeError [ERR_INVALID_STATE]: Invalid state: ReadableStream is locked` when SDK consumers iterate `result.fullStream` while other result accessors (such as `result.text` or UI stream helpers) are also consuming the stream.
+
+## 2.6.0
+
+### Minor Changes
+
+- [#1100](https://github.com/VoltAgent/voltagent/pull/1100) [`314ed40`](https://github.com/VoltAgent/voltagent/commit/314ed4096de7c4e1da551a5716fcd21690db3c1a) Thanks [@omeraplak](https://github.com/omeraplak)! - feat: add workflow observer/watch APIs for stream results
+
+  ### What's New
+  - Added run-level observer APIs on `WorkflowStreamResult`:
+    - `watch(cb)`
+    - `watchAsync(cb)`
+    - `observeStream()`
+    - `streamLegacy()`
+  - These APIs are now available on:
+    - `workflow.stream(...)`
+    - `workflow.timeTravelStream(...)`
+    - resumed stream results returned from `.resume(...)`
+  - Added test coverage for event ordering, unsubscribe behavior, multiple watchers, callback isolation, and `observeStream()` close semantics.
+
+  ### SDK Example
+
+  ```ts
+  const stream = workflow.stream({ value: 3 });
+
+  const unwatch = stream.watch((event) => {
+    console.log("[watch]", event.type, event.from);
+  });
+
+  const unwatchAsync = await stream.watchAsync(async (event) => {
+    if (event.type === "workflow-error") {
+      await notifyOps(event);
+    }
+  });
+
+  const reader = stream.observeStream().getReader();
+  const observerTask = (async () => {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      console.log("[observeStream]", value.type);
+    }
+  })();
+
+  for await (const event of stream) {
+    console.log("[main iterator]", event.type);
+  }
+
+  unwatch();
+  unwatchAsync();
+  await observerTask;
+
+  const state = await stream.streamLegacy().getWorkflowState();
+  console.log("final status:", state?.status);
+  ```
+
+  ### Time Travel Stream Example
+
+  ```ts
+  const replayStream = workflow.timeTravelStream({
+    executionId: sourceExecutionId,
+    stepId: "step-approval",
+  });
+
+  const stopReplayWatch = replayStream.watch((event) => {
+    console.log("[replay]", event.type, event.from);
+  });
+
+  for await (const event of replayStream) {
+    console.log("[replay iterator]", event.type);
+  }
+
+  stopReplayWatch();
+  ```
+
+- [#1102](https://github.com/VoltAgent/voltagent/pull/1102) [`7f923d2`](https://github.com/VoltAgent/voltagent/commit/7f923d2e4032a39cdfa430469afbdeafaac39b1c) Thanks [@omeraplak](https://github.com/omeraplak)! - feat: add workflow execution primitives (`bail`, `abort`, `getStepResult`, `getInitData`)
+
+  ### What's New
+
+  Step execution context now includes four new primitives:
+  - `bail(result?)`: complete the workflow early with a custom final result
+  - `abort()`: cancel the workflow immediately
+  - `getStepResult(stepId)`: get a prior step output directly (returns `null` if not available)
+  - `getInitData()`: get the original workflow input (stable across resume paths)
+
+  These primitives are available in all step contexts, including nested step flows.
+
+  ### Example: Early Complete with `bail`
+
+  ```ts
+  const workflow = createWorkflowChain({
+    id: "bail-demo",
+    input: z.object({ amount: z.number() }),
+    result: z.object({ status: z.string() }),
+  })
+    .andThen({
+      id: "risk-check",
+      execute: async ({ data, bail }) => {
+        if (data.amount > 10_000) {
+          bail({ status: "rejected" });
+        }
+        return { status: "approved" };
+      },
+    })
+    .andThen({
+      id: "never-runs-on-bail",
+      execute: async () => ({ status: "approved" }),
+    });
+  ```
+
+  ### Example: Cancel with `abort`
+
+  ```ts
+  const workflow = createWorkflowChain({
+    id: "abort-demo",
+    input: z.object({ requestId: z.string() }),
+    result: z.object({ done: z.boolean() }),
+  })
+    .andThen({
+      id: "authorization",
+      execute: async ({ abort }) => {
+        abort(); // terminal status: cancelled
+      },
+    })
+    .andThen({
+      id: "never-runs-on-abort",
+      execute: async () => ({ done: true }),
+    });
+  ```
+
+  ### Example: Use `getStepResult` + `getInitData`
+
+  ```ts
+  const workflow = createWorkflowChain({
+    id: "introspection-demo",
+    input: z.object({ userId: z.string(), value: z.number() }),
+    result: z.object({ total: z.number(), userId: z.string() }),
+  })
+    .andThen({
+      id: "step-1",
+      execute: async ({ data }) => ({ partial: data.value + 1 }),
+    })
+    .andThen({
+      id: "step-2",
+      execute: async ({ getStepResult, getInitData }) => {
+        const s1 = getStepResult<{ partial: number }>("step-1");
+        const init = getInitData();
+
+        return {
+          total: (s1?.partial ?? 0) + init.value,
+          userId: init.userId,
+        };
+      },
+    });
+  ```
+
+## 2.5.0
+
+### Minor Changes
+
+- [#1097](https://github.com/VoltAgent/voltagent/pull/1097) [`e15bb6e`](https://github.com/VoltAgent/voltagent/commit/e15bb6e6584e179b1a69925b597557402d957325) Thanks [@omeraplak](https://github.com/omeraplak)! - Add `startAsync()` to workflow and workflow chain APIs for fire-and-forget execution.
+
+  `startAsync()` starts a workflow run in the background and returns `{ executionId, workflowId, startAt }` immediately. The run keeps existing execution semantics, respects provided `executionId`, and persists terminal states in memory for later inspection.
+
+  Also adds workflow documentation updates with `startAsync()` usage examples in the workflow overview and streaming docs.
+
+- [#1099](https://github.com/VoltAgent/voltagent/pull/1099) [`160e60b`](https://github.com/VoltAgent/voltagent/commit/160e60b29603146211b51a7962ad770202feacb5) Thanks [@omeraplak](https://github.com/omeraplak)! - Add workflow time-travel and deterministic replay APIs.
+
+  New APIs:
+  - `workflow.timeTravel(options)`
+  - `workflow.timeTravelStream(options)`
+  - `workflowChain.timeTravel(options)`
+  - `workflowChain.timeTravelStream(options)`
+
+  `timeTravel` replays a historical execution from a selected step with a new execution ID, preserving the original execution history. Replay runs can optionally override selected-step input (`inputData`), resume payload (`resumeData`), and shared workflow state (`workflowStateOverride`).
+
+  Replay lineage metadata is now persisted on workflow state records:
+  - `replayedFromExecutionId`
+  - `replayFromStepId`
+
+  New public type exports from `@voltagent/core` include `WorkflowTimeTravelOptions`.
+
+  Also adds workflow documentation and usage examples for deterministic replay in overview, suspend/resume, and streaming docs.
+
+  Adds REST API documentation for replay endpoint `POST /workflows/:id/executions/:executionId/replay`, including request/response details and both cURL and JavaScript (`fetch`) code examples for default replay and replay with overrides (`inputData`, `resumeData`, `workflowStateOverride`).
+
+- [#1098](https://github.com/VoltAgent/voltagent/pull/1098) [`b610ec6`](https://github.com/VoltAgent/voltagent/commit/b610ec6ae335980e73f8a144e3e8a509e9da8265) Thanks [@omeraplak](https://github.com/omeraplak)! - Add workflow restart and crash-recovery APIs.
+
+  New APIs:
+  - `workflow.restart(executionId, options?)`
+  - `workflow.restartAllActive()`
+  - `workflowChain.restart(executionId, options?)`
+  - `workflowChain.restartAllActive()`
+  - `WorkflowRegistry.restartWorkflowExecution(workflowId, executionId, options?)`
+  - `WorkflowRegistry.restartAllActiveWorkflowRuns(options?)`
+
+  The workflow runtime now persists running checkpoints during execution, including step progress, shared workflow state, context, and usage snapshots, so interrupted runs in `running` state can be recovered deterministically.
+
+  New public types are now exported from `@voltagent/core` for consumer annotations, including `WorkflowRestartAllResult` and `WorkflowRestartCheckpoint`.
+
+  Also adds docs for restart/crash-recovery usage under workflow overview and suspend/resume docs.
+
 ## 2.4.5
 
 ### Patch Changes
